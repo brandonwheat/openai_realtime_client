@@ -61,7 +61,7 @@ class RealtimeClient:
         model: str = "gpt-4o-realtime-preview-2024-10-01",
         voice: str = "ash",
         instructions: str = "You are a helpful assistant",
-        temperature: float = 0.8,
+        temperature: float = 1.2,
         turn_detection_mode: TurnDetectionMode = TurnDetectionMode.MANUAL,
         tools: Optional[List[BaseTool]] = None,
         tool_callback: Optional[Callable] = None,
