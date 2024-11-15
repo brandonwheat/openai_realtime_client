@@ -59,11 +59,12 @@ class RealtimeClient:
         self, 
         api_key: str,
         model: str = "gpt-4o-realtime-preview-2024-10-01",
-        voice: str = "alloy",
+        voice: str = "ash",
         instructions: str = "You are a helpful assistant",
         temperature: float = 0.8,
         turn_detection_mode: TurnDetectionMode = TurnDetectionMode.MANUAL,
         tools: Optional[List[BaseTool]] = None,
+        tool_callback: Optional[Callable] = None,
         on_text_delta: Optional[Callable[[str], None]] = None,
         on_audio_delta: Optional[Callable[[bytes], None]] = None,
         on_interrupt: Optional[Callable[[], None]] = None,
@@ -86,10 +87,11 @@ class RealtimeClient:
         self.extra_event_handlers = extra_event_handlers or {}
         self.turn_detection_mode = turn_detection_mode
 
-        tools = tools or []
-        for i, tool in enumerate(tools):
-            tools[i] = adapt_to_async_tool(tool)
-        self.tools: List[AsyncBaseTool] = tools
+        # tools = tools or []
+        # for i, tool in enumerate(tools):
+        #     tools[i] = adapt_to_async_tool(tool)
+        self.tools = tools
+        self.tool_callback = tool_callback
 
         # Track current response state
         self._current_response_id = None
@@ -98,9 +100,6 @@ class RealtimeClient:
         # Track printing state for input and output transcripts
         self._print_input_transcript = False
         self._output_transcript_buffer = ""
-        
-        
-
         
 
     async def connect(self) -> None:
@@ -114,8 +113,10 @@ class RealtimeClient:
         self.ws = await websockets.connect(url, extra_headers=headers)
         
         # Set up default session configuration
-        tools = [t.metadata.to_openai_tool()['function'] for t in self.tools]
-        for t in tools:
+        # for t in self.tools:
+        #     print(t.metadata.to_openai_tool())
+        # tools = [t.metadata.to_openai_tool()['function'] for t in self.tools]
+        for t in self.tools:
             t['type'] = 'function'  # TODO: OpenAI docs didn't say this was needed, but it was
 
         
@@ -129,7 +130,7 @@ class RealtimeClient:
                 "input_audio_transcription": {
                     "model": "whisper-1"
                 },
-                "tools": tools,
+                "tools": self.tools,
                 "tool_choice": "auto",
                 "temperature": self.temperature,
             })
@@ -145,11 +146,11 @@ class RealtimeClient:
                 },
                 "turn_detection": {
                     "type": "server_vad",
-                    "threshold": 0.5,
+                    "threshold": 0.9,
                     "prefix_padding_ms": 500,
-                    "silence_duration_ms": 200
+                    "silence_duration_ms": 400
                 },
-                "tools": tools,
+                "tools": self.tools,
                 "tool_choice": "auto",
                 "temperature": self.temperature,
             })
@@ -259,20 +260,21 @@ class RealtimeClient:
             await self.ws.send(json.dumps(event))
 
     async def call_tool(self, call_id: str,tool_name: str, tool_arguments: Dict[str, Any]) -> None:
-        tool_selection = ToolSelection(
-            tool_id="tool_id",
-            tool_name=tool_name,
-            tool_kwargs=tool_arguments
-        )
-
-        # avoid blocking the event loop with sync tools
-        # by using asyncio.to_thread
-        tool_result = await asyncio.to_thread(
-            call_tool_with_selection,
-            tool_selection, 
-            self.tools, 
-            verbose=True
-        )
+        tool_result = await self.tool_callback(tool_name, **tool_arguments)
+        # tool_selection = ToolSelection(
+        #     tool_id="tool_id",
+        #     tool_name=tool_name,
+        #     tool_kwargs=tool_arguments
+        # )
+        #
+        # # avoid blocking the event loop with sync tools
+        # # by using asyncio.to_thread
+        # tool_result = await asyncio.to_thread(
+        #     call_tool_with_selection,
+        #     tool_selection,
+        #     self.tools,
+        #     verbose=True
+        # )
         await self.send_function_result(call_id, str(tool_result))
 
     async def handle_interruption(self):
@@ -299,6 +301,7 @@ class RealtimeClient:
             async for message in self.ws:
                 event = json.loads(message)
                 event_type = event.get("type")
+                # print(f"Received event: {event_type}")
                 
                 if event_type == "error":
                     print(f"Error: {event['error']}")
@@ -319,7 +322,7 @@ class RealtimeClient:
                 
                 # Handle interruptions
                 elif event_type == "input_audio_buffer.speech_started":
-                    print("\n[Speech detected")
+                    print("\n[Speech detected]")
                     if self._is_responding:
                         await self.handle_interruption()
 
@@ -341,6 +344,7 @@ class RealtimeClient:
                         self.on_audio_delta(audio_bytes)
                         
                 elif event_type == "response.function_call_arguments.done":
+                    print(f"Received function call arguments: {event['arguments']}")
                     await self.call_tool(event["call_id"], event['name'], json.loads(event['arguments']))
 
                 # Handle input audio transcription
@@ -367,7 +371,7 @@ class RealtimeClient:
                 elif event_type == "response.audio_transcript.done":
                     self._print_input_transcript = False
 
-                elif event_type in self.extra_event_handlers:
+                if event_type in self.extra_event_handlers:
                     self.extra_event_handlers[event_type](event)
 
         except websockets.exceptions.ConnectionClosed:

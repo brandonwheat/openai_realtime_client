@@ -3,6 +3,8 @@ import pyaudio
 import wave
 import queue
 import io
+import numpy as np
+
 from typing import Optional
 
 from pydub import AudioSegment
@@ -38,7 +40,7 @@ class AudioHandler:
         # Audio parameters
         self.format = pyaudio.paInt16
         self.channels = 1
-        self.rate = 24000
+        self.rate = 48000
         self.chunk = 1024
 
         self.audio = pyaudio.PyAudio()
@@ -58,6 +60,10 @@ class AudioHandler:
         self.playback_event = threading.Event()
         self.playback_thread = None
         self.stop_playback = False
+        self.outside_stream = None
+
+    def register_outside_stream(self, outside_stream):
+        self.outside_stream = outside_stream
 
     def start_recording(self) -> bytes:
         """Start recording audio from microphone and return bytes"""
@@ -128,7 +134,8 @@ class AudioHandler:
             channels=self.channels,
             rate=self.rate,
             input=True,
-            frames_per_buffer=self.chunk
+            frames_per_buffer=self.chunk,
+            input_device_index=1,
         )
         
         print("\nStreaming audio... Press 'q' to stop.")
@@ -138,11 +145,53 @@ class AudioHandler:
                 # Read raw PCM data
                 data = self.stream.read(self.chunk, exception_on_overflow=False)
                 # Stream directly without trying to decode
+                if self.rate != 24000:
+                    audio_segment = AudioSegment(
+                        data,
+                        sample_width=2,
+                        frame_rate=self.rate,
+                        channels=1
+                    )
+                    audio_segment =  audio_segment.set_frame_rate(24000)
+                    data = audio_segment.raw_data
                 await client.stream_audio(data)
             except Exception as e:
                 print(f"Error streaming: {e}")
                 break
             await asyncio.sleep(0.01)
+
+    async def start_streaming_audio(self, audio_queue, client: RealtimeClient):
+        if self.streaming:
+            return
+
+        self.streaming = True
+
+        while self.streaming:
+            try:
+                # Read raw PCM data
+                data = await audio_queue.get()
+                if isinstance(data, np.ndarray):
+                    data = data.tobytes()
+                # Stream directly without trying to decode
+                if self.rate != 24000:
+                    audio_segment = AudioSegment(
+                        data,
+                        sample_width=2,
+                        frame_rate=self.rate,
+                        channels=1
+                    )
+                    audio_segment =  audio_segment.set_frame_rate(24000)
+                    data = audio_segment.raw_data
+                await client.stream_audio(data)
+            except Exception as e:
+                print(f"Error while streaming: {e}")
+                break
+            await asyncio.sleep(0.01)
+
+    def stop_streaming_audio(self, audio_queue):
+        self.streaming = False
+        # Clear any remaining audio in queu
+
 
     def stop_streaming(self):
         """Stop audio streaming."""
@@ -167,15 +216,18 @@ class AudioHandler:
             self.playback_thread = threading.Thread(target=self._continuous_playback)
             self.playback_thread.start()
 
+
     def _continuous_playback(self):
         """Continuously play audio from the buffer"""
-        self.playback_stream = self.audio.open(
-            format=self.format,
-            channels=self.channels,
-            rate=self.rate,
-            output=True,
-            frames_per_buffer=self.chunk
-        )
+        self.playback_stream = self.outside_stream
+        # self.audio.open(
+        #     format=self.format,
+        #     channels=self.channels,
+        #     rate=self.rate,
+        #     output=True,
+        #     frames_per_buffer=self.chunk,
+        #     output_device_index=1
+        # )
 
         while not self.stop_playback:
             try:
@@ -188,8 +240,8 @@ class AudioHandler:
                 break
 
         if self.playback_stream:
-            self.playback_stream.stop_stream()
-            self.playback_stream.close()
+            # self.playback_stream.stop_stream()
+            # self.playback_stream.close()
             self.playback_stream = None
 
     def _play_audio_chunk(self, audio_chunk):
@@ -201,6 +253,9 @@ class AudioHandler:
                 frame_rate=24000,
                 channels=1
             )
+
+            if self.rate != 24000:
+                audio_segment = audio_segment.set_frame_rate(self.rate)
             
             # Ensure the audio is in the correct format for playback
             audio_data = audio_segment.raw_data
