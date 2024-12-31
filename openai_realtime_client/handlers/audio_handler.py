@@ -5,6 +5,7 @@ import queue
 import io
 import numpy as np
 
+
 from typing import Optional
 
 from pydub import AudioSegment
@@ -176,21 +177,21 @@ class AudioHandler:
 
         while self.streaming:
             try:
-                if self.playback_buffer.empty() or allow_interrupts:
-                    # Read raw PCM data
-                    data = await audio_queue.get()
-                    if isinstance(data, np.ndarray):
-                        data = data.tobytes()
-                    # Stream directly without trying to decode
-                    if self.rate != 24000:
-                        audio_segment = AudioSegment(
-                            data,
-                            sample_width=2,
-                            frame_rate=self.rate,
-                            channels=1
-                        )
-                        audio_segment =  audio_segment.set_frame_rate(24000)
-                        data = audio_segment.raw_data
+                # Read raw PCM data
+                data = await audio_queue.get()
+                if isinstance(data, np.ndarray):
+                    data = data.tobytes()
+                # Stream directly without trying to decode
+                if self.rate != 24000:
+                    audio_segment = AudioSegment(
+                        data,
+                        sample_width=2,
+                        frame_rate=self.rate,
+                        channels=1
+                    )
+                    audio_segment =  audio_segment.set_frame_rate(24000)
+                    data = audio_segment.raw_data
+                if not self.playback_started_event.is_set() or allow_interrupts:
                     await client.stream_audio(data)
             except Exception as e:
                 print(f"Error while streaming: {e}")
@@ -243,8 +244,10 @@ class AudioHandler:
                 audio_chunk = self.playback_buffer.get(timeout=0.1)
                 self._play_audio_chunk(audio_chunk)
                 self.playback_started_event.set()
+                print("playback started")
             except queue.Empty:
                 if self.playback_started_event.is_set():
+                    print("playback cleared")
                     self.playback_started_event.clear()
                     if self.playback_empty_callbacks:
                         for callback in self.playback_empty_callbacks:
